@@ -9,6 +9,7 @@ import {
   ScrollView,
   Alert,
   Linking,
+  PanResponder,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
@@ -16,6 +17,22 @@ import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import { BottomTabInset } from '@/constants/theme';
 
 type Step = 1 | 2 | 3 | 3.5 | 4;
+type CallStatus = '발신 중' | '의사 확인 중' | '수락' | '거절';
+type EmergencyType = '심정지' | '중증외상' | '급성심근경색' | '뇌졸중';
+
+interface PatientInfo {
+  age: number | null;
+  sex: 'M' | 'F' | null;
+  consciousness: string;
+  cpr: boolean;
+  cpr_minutes: number | null;
+  blood_pressure: string | null;
+  medications: string[];
+  surgery_history: string[];
+  emergency_type: EmergencyType;
+  onset_time: string | null;
+  missing_fields: string[];
+}
 
 interface HospitalCall {
   id: string;
@@ -25,7 +42,8 @@ interface HospitalCall {
   lng: number;
   distance: number;
   etaMin: number;
-  status: '발신 중' | '수락' | '거절';
+  status: CallStatus;
+  rejectReason?: string;
 }
 
 const JINJU_HOSPITALS = [
@@ -92,14 +110,14 @@ export default function HomeScreen() {
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   const [audioUri, setAudioUri] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordingMode, setRecordingMode] = useState<'initial' | 'supplement'>('initial');
   const [transcript, setTranscript] = useState('');
-  const [conditionTitle, setConditionTitle] = useState('');
-  const [keywords, setKeywords] = useState<string[]>([]);
+  const [patientInfo, setPatientInfo] = useState<PatientInfo | null>(null);
 
   const [callSeconds, setCallSeconds] = useState(0);
   const [hospitals, setHospitals] = useState<HospitalCall[]>([]);
-
   const [selectedHospital, setSelectedHospital] = useState<HospitalCall | null>(null);
+  const [isDirectCallMode, setIsDirectCallMode] = useState(false);
 
   const [arrivalSec, setArrivalSec] = useState(240);
   const [callDurationSec, setCallDurationSec] = useState(0);
@@ -107,6 +125,67 @@ export default function HomeScreen() {
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
+
+  const [sliderWidth, setSliderWidth] = useState(0);
+  const slideAnim = useRef(new Animated.Value(0)).current;
+  const maxSlideRef = useRef(0);
+  maxSlideRef.current = Math.max(0, sliderWidth - 54);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (_, gestureState) => {
+        const clampedX = Math.max(0, Math.min(gestureState.dx, maxSlideRef.current));
+        slideAnim.setValue(clampedX);
+      },
+      onPanResponderRelease: (_, gestureState) => {
+        if (maxSlideRef.current > 0 && gestureState.dx >= maxSlideRef.current * 0.8) {
+          Animated.timing(slideAnim, {
+            toValue: maxSlideRef.current,
+            duration: 120,
+            useNativeDriver: false,
+          }).start(() => {
+            Alert.alert('통화 종료', '병원과의 직통 통화가 종료되었습니다.');
+            slideAnim.setValue(0);
+          });
+        } else {
+          Animated.spring(slideAnim, {
+            toValue: 0,
+            useNativeDriver: false,
+          }).start();
+        }
+      },
+    })
+  ).current;
+
+  const [pressingId, setPressingId] = useState<string | null>(null);
+  const holdAnim = useRef(new Animated.Value(0)).current;
+
+  const handleHoldStart = (hospital: HospitalCall) => {
+    setPressingId(hospital.id);
+    holdAnim.setValue(0);
+
+    Animated.timing(holdAnim, {
+      toValue: 1,
+      duration: 800,
+      useNativeDriver: false,
+    }).start(({ finished }) => {
+      if (finished) {
+        setPressingId(null);
+        holdAnim.setValue(0);
+        setIsDirectCallMode(false);
+        setSelectedHospital(hospital);
+        setStep(3.5);
+      }
+    });
+  };
+
+  const handleHoldEnd = () => {
+    holdAnim.stopAnimation();
+    holdAnim.setValue(0);
+    setPressingId(null);
+  };
 
   useEffect(() => {
     (async () => {
@@ -174,22 +253,33 @@ export default function HomeScreen() {
     }, 1000);
 
     const t1 = setTimeout(() => {
-      setHospitals((prev) => prev.map((h) => (h.id === 'h4' ? { ...h, status: '거절' } : h)));
+      setHospitals((prev) =>
+        prev.map((h) =>
+          h.id === 'h4' ? { ...h, status: '거절', rejectReason: '당직 전문의 부재' } : h
+        )
+      );
     }, 1500);
 
     const t2 = setTimeout(() => {
-      setHospitals((prev) => prev.map((h) => (h.id === 'h1' ? { ...h, status: '수락' } : h)));
-    }, 2500);
+      setHospitals((prev) =>
+        prev.map((h) => (h.id === 'h1' ? { ...h, status: '의사 확인 중' } : h))
+      );
+    }, 2200);
 
     const t3 = setTimeout(() => {
       setHospitals((prev) => prev.map((h) => (h.id === 'h2' ? { ...h, status: '수락' } : h)));
-    }, 3500);
+    }, 3200);
+
+    const t4 = setTimeout(() => {
+      setHospitals((prev) => prev.map((h) => (h.id === 'h1' ? { ...h, status: '수락' } : h)));
+    }, 4500);
 
     return () => {
       clearInterval(timer);
       clearTimeout(t1);
       clearTimeout(t2);
       clearTimeout(t3);
+      clearTimeout(t4);
     };
   }, [step, coords]);
 
@@ -207,6 +297,7 @@ export default function HomeScreen() {
   useEffect(() => {
     if (step !== 4) return;
     setCallDurationSec(0);
+    slideAnim.setValue(0);
     const interval = setInterval(() => {
       setArrivalSec((prev) => (prev > 0 ? prev - 1 : 0));
       setCallDurationSec((prev) => prev + 1);
@@ -241,7 +332,7 @@ export default function HomeScreen() {
     </View>
   );
 
-  const handleMicPress = async () => {
+  const handleMicPress = async (mode: 'initial' | 'supplement' = 'initial') => {
     try {
       if (!isRecording) {
         const status = await AudioModule.requestRecordingPermissionsAsync();
@@ -253,10 +344,12 @@ export default function HomeScreen() {
         await audioRecorder.prepareToRecordAsync();
         audioRecorder.record();
 
-        setAudioUri(null);
-        setTranscript('');
-        setConditionTitle('');
-        setKeywords([]);
+        setRecordingMode(mode);
+        if (mode === 'initial') {
+          setAudioUri(null);
+          setTranscript('');
+          setPatientInfo(null);
+        }
         setIsRecording(true);
       } else {
         setIsRecording(false);
@@ -265,9 +358,37 @@ export default function HomeScreen() {
         setAudioUri(uri);
         console.log('생성된 실제 녹음 파일(.m4a):', uri);
 
-        setTranscript('60대 남성, 흉통 호소하다가 심정지 발생. 현재 CPR 진행 중입니다.');
-        setConditionTitle('심정지');
-        setKeywords(['즉시', 'CPR 진행 중', '60대 남성']);
+        if (recordingMode === 'initial') {
+          setTranscript('60대 남성, 의식 무반응이고 CPR 5분째 진행 중입니다.');
+          setPatientInfo({
+            age: 65,
+            sex: 'M',
+            consciousness: '무반응',
+            cpr: true,
+            cpr_minutes: 5,
+            blood_pressure: null,
+            medications: [],
+            surgery_history: [],
+            emergency_type: '심정지',
+            onset_time: null,
+            missing_fields: ['복용약', '수술력', '발생 시각'],
+          });
+        } else {
+          setTranscript(
+            '60대 남성, 의식 무반응이고 CPR 5분째 진행 중입니다. (추가: 와파린 복용 중, 심장 스텐트 수술력, 10분 전 발생)'
+          );
+          setPatientInfo((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  medications: ['와파린'],
+                  surgery_history: ['심장 스텐트'],
+                  onset_time: '10분 전',
+                  missing_fields: [],
+                }
+              : null
+          );
+        }
       }
     } catch (err) {
       console.error('마이크 녹음 오류:', err);
@@ -275,18 +396,39 @@ export default function HomeScreen() {
     }
   };
 
+  const handleDirectCall = (hospital: HospitalCall) => {
+    Alert.alert(
+      '직접 전화 연결',
+      `${hospital.name}의 AI 자동 발신을 즉시 중단하고 구급대원이 직접 연결하시겠습니까?`,
+      [
+        { text: '취소', style: 'cancel' },
+        {
+          text: '직접 연결',
+          onPress: () => {
+            setIsDirectCallMode(true);
+            setSelectedHospital(hospital);
+            setStep(3.5);
+          },
+        },
+      ]
+    );
+  };
+
   const resetAllToHome = () => {
     setIsRecording(false);
     setAudioUri(null);
     setTranscript('');
-    setConditionTitle('');
-    setKeywords([]);
+    setPatientInfo(null);
     setSelectedHospital(null);
+    setIsDirectCallMode(false);
+    setPressingId(null);
+    holdAnim.setValue(0);
+    slideAnim.setValue(0);
     setStep(1);
   };
 
   if (step === 1) {
-    const hasResult = transcript.length > 0;
+    const hasResult = patientInfo !== null;
     return (
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="light-content" />
@@ -305,20 +447,26 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        <View style={styles.centerSection}>
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.centerSection}
+          showsVerticalScrollIndicator={false}
+        >
           <Text style={styles.guideTitle}>
             {isRecording
-              ? '환자 상태를 말씀해 주세요'
+              ? recordingMode === 'supplement'
+                ? '누락된 항목을 말씀해 주세요'
+                : '환자 상태를 말씀해 주세요'
               : hasResult
-              ? `AI 분류: [${conditionTitle}]`
+              ? `AI 4대 응급 분류: [${patientInfo.emergency_type}]`
               : '음성으로 환자 상태를 입력하세요'}
           </Text>
           <Text style={styles.guideSub}>
             {isRecording
               ? '말씀이 끝나면 [녹음 완료] 버튼을 눌러주세요'
               : hasResult
-              ? '현재 진주시 GPS 기준 주변 병원 5곳에 동시 호출합니다'
-              : '증상, 의식 상태, 처치를 말하면 AI가 자동 요약합니다'}
+              ? 'AI가 추출한 환자 정보를 확인하고 필요 시 보완하세요'
+              : '나이, 의식, 처치, 복용약, 수술력을 말하면 AI가 구조화합니다'}
           </Text>
 
           <View style={styles.micContainer}>
@@ -335,11 +483,11 @@ export default function HomeScreen() {
                   ? styles.micButtonDone
                   : styles.micButtonIdle,
               ]}
-              onPress={handleMicPress}
+              onPress={() => handleMicPress('initial')}
             >
               <Text style={styles.micIcon}>{isRecording ? '⏹️' : hasResult ? '🔄' : '🎙️'}</Text>
               <Text style={styles.micLabel}>
-                {isRecording ? '녹음 완료' : hasResult ? '다시 말하기' : '음성 녹음 시작'}
+                {isRecording ? '녹음 완료' : hasResult ? '처음부터 다시' : '음성 녹음 시작'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -350,16 +498,54 @@ export default function HomeScreen() {
             ) : hasResult ? (
               <>
                 <Text style={styles.transcriptText}>"{transcript}"</Text>
-                <View style={styles.tagRow}>
-                  <View style={styles.urgentTag}>
-                    <Text style={styles.urgentTagText}>⚠ {conditionTitle}</Text>
+
+                <View style={styles.schemaGrid}>
+                  <View style={styles.schemaChip}>
+                    <Text style={styles.schemaLabel}>분류</Text>
+                    <Text style={styles.schemaValueUrgent}>{patientInfo.emergency_type}</Text>
                   </View>
-                  {keywords.map((kw, idx) => (
-                    <View key={idx} style={styles.keywordTag}>
-                      <Text style={styles.keywordTagText}>#{kw}</Text>
-                    </View>
-                  ))}
+                  <View style={styles.schemaChip}>
+                    <Text style={styles.schemaLabel}>환자</Text>
+                    <Text style={styles.schemaValue}>
+                      {patientInfo.age ? `${patientInfo.age}세` : '미상'} ·{' '}
+                      {patientInfo.sex === 'M' ? '남' : patientInfo.sex === 'F' ? '여' : '미상'}
+                    </Text>
+                  </View>
+                  <View style={styles.schemaChip}>
+                    <Text style={styles.schemaLabel}>의식/처치</Text>
+                    <Text style={styles.schemaValue}>
+                      {patientInfo.consciousness}
+                      {patientInfo.cpr ? ` · CPR ${patientInfo.cpr_minutes || ''}분` : ''}
+                    </Text>
+                  </View>
+                  <View style={styles.schemaChip}>
+                    <Text style={styles.schemaLabel}>복용약/수술력</Text>
+                    <Text style={styles.schemaValue}>
+                      {patientInfo.medications.length > 0
+                        ? patientInfo.medications.join(', ')
+                        : '미확인'}{' '}
+                      /{' '}
+                      {patientInfo.surgery_history.length > 0
+                        ? patientInfo.surgery_history.join(', ')
+                        : '미확인'}
+                    </Text>
+                  </View>
                 </View>
+
+                {patientInfo.missing_fields.length > 0 && (
+                  <View style={styles.missingBox}>
+                    <Text style={styles.missingTitle}>
+                      ❓ AI 되묻기: [{patientInfo.missing_fields.join(', ')}] 정보가 비어 있습니다.
+                    </Text>
+                    <TouchableOpacity
+                      style={styles.supplementBtn}
+                      onPress={() => handleMicPress('supplement')}
+                    >
+                      <Text style={styles.supplementBtnText}>🎙️ 누락 정보 추가 녹음하기</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
                 {audioUri && (
                   <Text style={styles.audioFileText}>
                     📎 녹음 파일 저장됨: {audioUri.split('/').pop()}
@@ -372,16 +558,43 @@ export default function HomeScreen() {
               </Text>
             )}
           </View>
-        </View>
+        </ScrollView>
+
+        {hasResult && patientInfo.emergency_type === '심정지' && !isRecording && (
+          <TouchableOpacity
+            style={styles.directPriorityBtn}
+            onPress={() => {
+              const nearest = [...JINJU_HOSPITALS]
+                .map((h) => {
+                  const dist = getDistanceKm(coords.lat, coords.lng, h.lat, h.lng);
+                  return {
+                    ...h,
+                    distance: dist,
+                    etaMin: Math.max(2, Math.round((dist / 45) * 60)),
+                    status: '수락' as CallStatus,
+                  };
+                })
+                .sort((a, b) => a.distance - b.distance)[0];
+              handleDirectCall(nearest);
+            }}
+          >
+            <Text style={styles.directPriorityBtnText}>
+              ⚡ 심정지 최단거리 병원 즉시 직접 전화 모드
+            </Text>
+          </TouchableOpacity>
+        )}
 
         <TouchableOpacity
           style={[styles.primaryBtn, hasResult && !isRecording && styles.primaryBtnActive]}
           disabled={!hasResult || isRecording}
-          onPress={() => setStep(2)}
+          onPress={() => {
+            setIsDirectCallMode(false);
+            setStep(2);
+          }}
         >
           <Text style={styles.primaryBtnText}>
             {hasResult && !isRecording
-              ? `>>> [${conditionTitle}] 진주시 병원 5곳 동시 호출`
+              ? `>>> [${patientInfo.emergency_type}] AI 병원 호출 시작`
               : '먼저 환자 상태를 녹음하세요'}
           </Text>
         </TouchableOpacity>
@@ -391,6 +604,7 @@ export default function HomeScreen() {
 
   if (step === 2) {
     const acceptedList = hospitals.filter((h) => h.status === '수락');
+    const doctorCheckingCount = hospitals.filter((h) => h.status === '의사 확인 중').length;
     const waitingCount = hospitals.filter((h) => h.status === '발신 중').length;
     const rejectedCount = hospitals.filter((h) => h.status === '거절').length;
 
@@ -399,7 +613,9 @@ export default function HomeScreen() {
         <StatusBar barStyle="light-content" />
         {renderStepHeader('병원 호출', 2)}
 
-        <Text style={styles.subCaption}>{conditionTitle} · 진주시 응급의료기관 5곳 동시 호출</Text>
+        <Text style={styles.subCaption}>
+          {patientInfo?.emergency_type} · AI 음성 대본 발신 및 응답 분석 중
+        </Text>
 
         <View style={styles.timerRow}>
           <Text style={styles.bigTimer}>{formatTime(callSeconds)}</Text>
@@ -411,8 +627,12 @@ export default function HomeScreen() {
             <Text style={[styles.countLabel, { color: '#22C55E' }]}>✔ 수락</Text>
             <Text style={styles.countNumber}>{acceptedList.length}</Text>
           </View>
+          <View style={[styles.countBox, { borderColor: '#3B82F6' }]}>
+            <Text style={[styles.countLabel, { color: '#60A5FA' }]}>🩺 의사확인</Text>
+            <Text style={styles.countNumber}>{doctorCheckingCount}</Text>
+          </View>
           <View style={[styles.countBox, { borderColor: '#EAB308' }]}>
-            <Text style={[styles.countLabel, { color: '#EAB308' }]}>💬 대기</Text>
+            <Text style={[styles.countLabel, { color: '#EAB308' }]}>💬 발신</Text>
             <Text style={styles.countNumber}>{waitingCount}</Text>
           </View>
           <View style={[styles.countBox, { borderColor: '#374151' }]}>
@@ -424,6 +644,7 @@ export default function HomeScreen() {
         <ScrollView style={{ flex: 1, marginVertical: 12 }}>
           {hospitals.map((h) => {
             const isAccepted = h.status === '수락';
+            const isDoctorChecking = h.status === '의사 확인 중';
             const isRejected = h.status === '거절';
             return (
               <View
@@ -431,21 +652,30 @@ export default function HomeScreen() {
                 style={[
                   styles.callRowCard,
                   isAccepted && { borderColor: '#22C55E' },
+                  isDoctorChecking && { borderColor: '#3B82F6' },
                   isRejected && { opacity: 0.45 },
                 ]}
               >
                 <Text style={styles.callStatusIcon}>
-                  {isAccepted ? '🟢' : isRejected ? '✖' : '🟡'}
+                  {isAccepted ? '🟢' : isDoctorChecking ? '🔵' : isRejected ? '✖' : '🟡'}
                 </Text>
-                <Text style={styles.callHospitalName} numberOfLines={1}>
-                  {h.name}
-                </Text>
-                <Text style={styles.callDistance}>{h.distance}km</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.callHospitalName} numberOfLines={1}>
+                    {h.name}
+                  </Text>
+                  <Text style={styles.callSubInfo}>
+                    {h.distance}km · 약 {h.etaMin}분
+                    {h.rejectReason ? ` (${h.rejectReason})` : ''}
+                  </Text>
+                </View>
+
                 <Text
                   style={[
                     styles.callStatusText,
                     isAccepted
                       ? { color: '#22C55E' }
+                      : isDoctorChecking
+                      ? { color: '#60A5FA' }
                       : isRejected
                       ? { color: '#9CA3AF' }
                       : { color: '#EAB308' },
@@ -453,6 +683,15 @@ export default function HomeScreen() {
                 >
                   {h.status}
                 </Text>
+
+                {!isRejected && (
+                  <TouchableOpacity
+                    style={styles.directMiniBtn}
+                    onPress={() => handleDirectCall(h)}
+                  >
+                    <Text style={styles.directMiniBtnText}>직접 전화</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             );
           })}
@@ -474,7 +713,7 @@ export default function HomeScreen() {
           style={styles.cancelOutlineBtn}
           delayLongPress={800}
           onLongPress={() => {
-            Alert.alert('호출 취소', '전체 병원 호출이 취소되었습니다.');
+            Alert.alert('호출 취소', '전체 AI 병원 호출이 취소되었습니다.');
             setStep(1);
           }}
         >
@@ -495,23 +734,30 @@ export default function HomeScreen() {
         {renderStepHeader('병원 선택', 3)}
 
         <View style={styles.yellowBanner}>
-          <Text style={styles.yellowBannerText}>● 병원 {acceptedSorted.length}곳이 대기 중</Text>
+          <Text style={styles.yellowBannerText}>● 수용 가능 병원 {acceptedSorted.length}곳</Text>
           <Text style={styles.yellowBannerTimer}>{formatTime(callSeconds)}</Text>
         </View>
 
         <ScrollView style={{ flex: 1 }}>
           {acceptedSorted.map((h, index) => {
             const isFirst = index === 0;
+            const isPressing = pressingId === h.id;
+            const gaugeWidth = holdAnim.interpolate({
+              inputRange: [0, 1],
+              outputRange: ['0%', '100%'],
+            });
+
             return (
               <TouchableOpacity
                 key={h.id}
-                activeOpacity={0.85}
-                delayLongPress={600}
-                onLongPress={() => {
-                  setSelectedHospital(h);
-                  setStep(3.5);
-                }}
-                style={[styles.selectCard, isFirst && styles.selectCardFirst]}
+                activeOpacity={0.95}
+                onPressIn={() => handleHoldStart(h)}
+                onPressOut={handleHoldEnd}
+                style={[
+                  styles.selectCard,
+                  isFirst && styles.selectCardFirst,
+                  isPressing && styles.selectCardPressing,
+                ]}
               >
                 <View style={styles.rankRow}>
                   <View style={[styles.rankBadge, isFirst && styles.rankBadgeFirst]}>
@@ -519,6 +765,12 @@ export default function HomeScreen() {
                       {isFirst ? '1순위 · 가장 빠름' : `${index + 1}순위`}
                     </Text>
                   </View>
+                  <TouchableOpacity
+                    style={styles.cardDirectBtn}
+                    onPress={() => handleDirectCall(h)}
+                  >
+                    <Text style={styles.cardDirectBtnText}>📞 직접 전화</Text>
+                  </TouchableOpacity>
                 </View>
 
                 <Text style={styles.selectHospitalName}>{h.name}</Text>
@@ -529,8 +781,22 @@ export default function HomeScreen() {
                   <Text style={styles.selectDistance}>{h.distance}km</Text>
                 </View>
 
-                <View style={styles.longPressHintRow}>
-                  <Text style={styles.longPressHintText}>✋ 길게 눌러 직통 연결 ({h.phone})</Text>
+                <View style={styles.holdProgressContainer}>
+                  {isPressing && (
+                    <Animated.View
+                      style={[styles.holdProgressFill, { width: gaugeWidth }]}
+                    />
+                  )}
+                  <Text
+                    style={[
+                      styles.longPressHintText,
+                      isPressing && { color: '#FFFFFF', fontWeight: 'bold' },
+                    ]}
+                  >
+                    {isPressing
+                      ? '⏳ 연결 중... 끝까지 누르고 계세요'
+                      : `✋ 꾹 눌러 수용 확정 및 직통 연결 (${h.phone})`}
+                  </Text>
                 </View>
               </TouchableOpacity>
             );
@@ -538,7 +804,7 @@ export default function HomeScreen() {
         </ScrollView>
 
         <Text style={styles.bottomNotice}>
-          {conditionTitle} · 선택하면 나머지 병원 호출은 자동 취소
+          {patientInfo?.emergency_type} · 확정 시 나머지 병원 AI 호출 자동 취소
         </Text>
       </SafeAreaView>
     );
@@ -555,8 +821,16 @@ export default function HomeScreen() {
             <Text style={{ fontSize: 44 }}>📞</Text>
           </View>
           <Text style={styles.connectingHospital}>{selectedHospital.name}</Text>
-          <Text style={styles.connectingSub}>직통 연결 중 ({selectedHospital.phone})</Text>
-          <Text style={styles.connectingCancelNote}>✖ 나머지 병원 호출 취소됨</Text>
+          <Text style={styles.connectingSub}>
+            {isDirectCallMode
+              ? `구급대원 직접 전화 연결 중 (${selectedHospital.phone})`
+              : `직통 연결 중 (${selectedHospital.phone})`}
+          </Text>
+          <Text style={styles.connectingCancelNote}>
+            {isDirectCallMode
+              ? '⚡ 해당 병원 AI 발신 즉시 중단됨'
+              : '✖ 나머지 병원 AI 호출 취소됨'}
+          </Text>
         </View>
       </SafeAreaView>
     );
@@ -573,7 +847,9 @@ export default function HomeScreen() {
           <Text style={styles.confirmedHospital}>
             {selectedHospital?.name || '경상국립대학교병원'}
           </Text>
-          <Text style={styles.confirmedSub}>{conditionTitle} · 수용 확정</Text>
+          <Text style={styles.confirmedSub}>
+            {patientInfo?.emergency_type} · {isDirectCallMode ? '직접 통화 연결' : 'AI 수용 확정'}
+          </Text>
         </View>
       </View>
 
@@ -582,9 +858,7 @@ export default function HomeScreen() {
         <Text style={styles.countdownText}>
           {Math.floor(arrivalSec / 60)}:{String(arrivalSec % 60).padStart(2, '0')}
         </Text>
-        <Text style={styles.remainKm}>
-          {selectedHospital?.distance || '2.4'} km 남음
-        </Text>
+        <Text style={styles.remainKm}>{selectedHospital?.distance || '2.4'} km 남음</Text>
 
         <View style={styles.routeTrack}>
           <View style={styles.ambulanceDot}>
@@ -627,15 +901,21 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity
+        <View
           style={styles.endCallBtn}
-          onPress={() => Alert.alert('통화 종료', '병원과의 직통 통화가 종료되었습니다.')}
+          onLayout={(e) => setSliderWidth(e.nativeEvent.layout.width - 12)}
         >
-          <View style={styles.endCallIconBox}>
-            <Text style={{ color: '#FFF', fontWeight: 'bold' }}>》</Text>
-          </View>
           <Text style={styles.endCallText}>밀어서 통화 종료</Text>
-        </TouchableOpacity>
+          <Animated.View
+            {...panResponder.panHandlers}
+            style={[
+              styles.endCallIconBox,
+              { transform: [{ translateX: slideAnim }] },
+            ]}
+          >
+            <Text style={{ color: '#FFF', fontWeight: 'bold' }}>》</Text>
+          </Animated.View>
+        </View>
 
         <TouchableOpacity style={styles.finishMissionBtn} onPress={resetAllToHome}>
           <Text style={styles.finishMissionText}>이송 완료 · 출동 종료</Text>
@@ -653,7 +933,7 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     paddingBottom: BottomTabInset + 12,
   },
-  topNav: { marginBottom: 14 },
+  topNav: { marginBottom: 12 },
   topNavRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
@@ -675,6 +955,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: '#22252A',
+    marginBottom: 8,
   },
   badge119: {
     backgroundColor: '#E11D48',
@@ -694,71 +975,108 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   nightBadgeText: { color: '#D1D5DB', fontSize: 12 },
-  centerSection: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  guideTitle: { color: '#FFF', fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 6 },
-  guideSub: { color: '#9CA3AF', fontSize: 13, textAlign: 'center', marginBottom: 28 },
-  micContainer: {
-    width: 140,
-    height: 140,
+  centerSection: {
+    flexGrow: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 28,
+    paddingVertical: 10,
+  },
+  guideTitle: { color: '#FFF', fontSize: 21, fontWeight: 'bold', textAlign: 'center', marginBottom: 6 },
+  guideSub: { color: '#9CA3AF', fontSize: 13, textAlign: 'center', marginBottom: 20 },
+  micContainer: {
+    width: 126,
+    height: 126,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 20,
   },
   pulseRing: {
     position: 'absolute',
-    width: 136,
-    height: 136,
-    borderRadius: 68,
+    width: 124,
+    height: 124,
+    borderRadius: 62,
     backgroundColor: 'rgba(225, 29, 72, 0.25)',
     borderWidth: 2,
     borderColor: '#E11D48',
   },
   micButton: {
-    width: 118,
-    height: 118,
-    borderRadius: 59,
+    width: 108,
+    height: 108,
+    borderRadius: 54,
     justifyContent: 'center',
     alignItems: 'center',
   },
   micButtonIdle: { backgroundColor: '#2563EB' },
   micButtonRecording: { backgroundColor: '#E11D48' },
   micButtonDone: { backgroundColor: '#1F2937', borderWidth: 2, borderColor: '#4B5563' },
-  micIcon: { fontSize: 32, marginBottom: 4 },
-  micLabel: { color: '#FFF', fontSize: 13, fontWeight: 'bold' },
+  micIcon: { fontSize: 28, marginBottom: 4 },
+  micLabel: { color: '#FFF', fontSize: 12, fontWeight: 'bold' },
   resultBox: {
     width: '100%',
-    minHeight: 115,
+    minHeight: 110,
     backgroundColor: '#141619',
     borderRadius: 14,
-    padding: 16,
+    padding: 14,
     borderWidth: 1,
     borderColor: '#262930',
     justifyContent: 'center',
   },
   listeningText: { color: '#F87171', fontSize: 15, fontWeight: 'bold', textAlign: 'center' },
   placeholderText: { color: '#6B7280', fontSize: 14, textAlign: 'center' },
-  transcriptText: { color: '#F3F4F6', fontSize: 15, fontWeight: '600', lineHeight: 22, marginBottom: 10 },
-  tagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  urgentTag: {
-    backgroundColor: 'rgba(239, 68, 68, 0.2)',
-    borderWidth: 1,
-    borderColor: '#EF4444',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
+  transcriptText: { color: '#F3F4F6', fontSize: 14, fontWeight: '600', lineHeight: 20, marginBottom: 10 },
+  schemaGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
   },
-  urgentTagText: { color: '#F87171', fontWeight: 'bold', fontSize: 12 },
-  keywordTag: { backgroundColor: '#22252A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
-  keywordTagText: { color: '#93C5FD', fontSize: 12, fontWeight: '600' },
+  schemaChip: {
+    backgroundColor: '#1C1F24',
+    borderWidth: 1,
+    borderColor: '#2E333B',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    minWidth: '48%',
+    flex: 1,
+  },
+  schemaLabel: { color: '#9CA3AF', fontSize: 11, marginBottom: 2 },
+  schemaValue: { color: '#F9FAFB', fontSize: 13, fontWeight: 'bold' },
+  schemaValueUrgent: { color: '#F87171', fontSize: 13, fontWeight: 'bold' },
+  missingBox: {
+    marginTop: 10,
+    backgroundColor: 'rgba(234, 179, 8, 0.12)',
+    borderWidth: 1,
+    borderColor: '#EAB308',
+    borderRadius: 8,
+    padding: 10,
+  },
+  missingTitle: { color: '#FDE047', fontSize: 12, fontWeight: '600', marginBottom: 8 },
+  supplementBtn: {
+    backgroundColor: '#EAB308',
+    paddingVertical: 8,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  supplementBtnText: { color: '#0B0C0E', fontSize: 12, fontWeight: 'bold' },
   audioFileText: {
     color: '#6EE7B7',
     fontSize: 11,
     marginTop: 10,
   },
 
+  directPriorityBtn: {
+    backgroundColor: '#1E293B',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginTop: 6,
+  },
+  directPriorityBtnText: { color: '#7DD3FC', fontSize: 13, fontWeight: 'bold' },
   primaryBtn: {
     backgroundColor: '#1F2229',
-    paddingVertical: 16,
+    paddingVertical: 15,
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 8,
@@ -768,38 +1086,47 @@ const styles = StyleSheet.create({
   primaryBtnText: { color: '#FFFFFF', fontSize: 15, fontWeight: 'bold' },
 
   subCaption: { color: '#D1D5DB', fontSize: 14, fontWeight: '600', marginBottom: 6 },
-  timerRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 14 },
-  bigTimer: { color: '#FFFFFF', fontSize: 52, fontWeight: '300', letterSpacing: 2 },
+  timerRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 12 },
+  bigTimer: { color: '#FFFFFF', fontSize: 48, fontWeight: '300', letterSpacing: 2 },
   timerSuffix: { color: '#9CA3AF', fontSize: 15, marginLeft: 8 },
-  countGrid: { flexDirection: 'row', gap: 10 },
+  countGrid: { flexDirection: 'row', gap: 8 },
   countBox: {
     flex: 1,
     backgroundColor: '#141619',
     borderWidth: 1.5,
     borderRadius: 12,
-    padding: 12,
+    padding: 10,
   },
-  countLabel: { fontSize: 13, fontWeight: 'bold', marginBottom: 6 },
-  countNumber: { color: '#FFFFFF', fontSize: 32, fontWeight: 'bold' },
+  countLabel: { fontSize: 12, fontWeight: 'bold', marginBottom: 4 },
+  countNumber: { color: '#FFFFFF', fontSize: 26, fontWeight: 'bold' },
   callRowCard: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#141619',
-    paddingVertical: 14,
-    paddingHorizontal: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#22252A',
     marginBottom: 8,
   },
   callStatusIcon: { fontSize: 14, marginRight: 10 },
-  callHospitalName: { color: '#FFFFFF', fontSize: 15, fontWeight: 'bold', flex: 1 },
-  callDistance: { color: '#9CA3AF', fontSize: 13, marginRight: 12 },
-  callStatusText: { fontSize: 13, fontWeight: 'bold' },
+  callHospitalName: { color: '#FFFFFF', fontSize: 15, fontWeight: 'bold' },
+  callSubInfo: { color: '#9CA3AF', fontSize: 12, marginTop: 2 },
+  callStatusText: { fontSize: 12, fontWeight: 'bold', marginRight: 8 },
+  directMiniBtn: {
+    backgroundColor: '#262930',
+    borderWidth: 1,
+    borderColor: '#4B5563',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  directMiniBtnText: { color: '#E5E7EB', fontSize: 11, fontWeight: 'bold' },
   cancelOutlineBtn: {
     borderWidth: 1,
     borderColor: '#374151',
-    paddingVertical: 14,
+    paddingVertical: 13,
     borderRadius: 12,
     alignItems: 'center',
     marginTop: 8,
@@ -830,7 +1157,16 @@ const styles = StyleSheet.create({
     borderColor: '#22C55E',
     backgroundColor: '#111915',
   },
-  rankRow: { flexDirection: 'row', marginBottom: 10 },
+  selectCardPressing: {
+    borderColor: '#4ADE80',
+    transform: [{ scale: 0.985 }],
+  },
+  rankRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
   rankBadge: {
     backgroundColor: '#262930',
     paddingHorizontal: 10,
@@ -839,17 +1175,37 @@ const styles = StyleSheet.create({
   },
   rankBadgeFirst: { backgroundColor: '#22C55E' },
   rankBadgeText: { color: '#D1D5DB', fontSize: 12, fontWeight: 'bold' },
+  cardDirectBtn: {
+    backgroundColor: '#1F2937',
+    borderWidth: 1,
+    borderColor: '#4B5563',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 6,
+  },
+  cardDirectBtnText: { color: '#F3F4F6', fontSize: 12, fontWeight: 'bold' },
   selectHospitalName: { color: '#FFFFFF', fontSize: 22, fontWeight: 'bold', marginBottom: 14 },
   etaRow: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 12 },
   bigEta: { color: '#FFFFFF', fontSize: 44, fontWeight: 'bold' },
   etaUnit: { color: '#FFFFFF', fontSize: 18, marginLeft: 4, marginRight: 14 },
   selectDistance: { color: '#9CA3AF', fontSize: 16 },
-  longPressHintRow: {
-    borderTopWidth: 1,
-    borderTopColor: '#252930',
-    paddingTop: 10,
+  holdProgressContainer: {
+    height: 40,
+    backgroundColor: '#1E2229',
+    borderRadius: 8,
+    overflow: 'hidden',
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
   },
-  longPressHintText: { color: '#D1D5DB', fontSize: 13, fontWeight: '600' },
+  holdProgressFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    backgroundColor: '#16A34A',
+  },
+  longPressHintText: { color: '#D1D5DB', fontSize: 13, fontWeight: '600', zIndex: 1 },
   bottomNotice: { color: '#9CA3AF', fontSize: 12, textAlign: 'center', marginTop: 6 },
 
   connectingCenter: { flex: 1, justifyContent: 'center', alignItems: 'center' },
@@ -926,28 +1282,32 @@ const styles = StyleSheet.create({
   audioToggleOff: { opacity: 0.5 },
   audioToggleText: { color: '#FFFFFF', fontSize: 13, fontWeight: '600' },
   endCallBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    height: 52,
+    justifyContent: 'center',
     backgroundColor: '#141619',
     borderWidth: 1,
     borderColor: '#374151',
     borderRadius: 10,
-    padding: 6,
+    paddingHorizontal: 6,
     marginBottom: 10,
+    position: 'relative',
   },
   endCallIconBox: {
+    position: 'absolute',
+    left: 6,
+    width: 44,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
     backgroundColor: '#E11D48',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
     borderRadius: 8,
+    zIndex: 2,
   },
   endCallText: {
-    flex: 1,
     textAlign: 'center',
     color: '#D1D5DB',
     fontSize: 14,
     fontWeight: 'bold',
-    marginRight: 30,
   },
   finishMissionBtn: {
     borderWidth: 1,
