@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
+import { useAudioRecorder, AudioModule, RecordingPresets } from 'expo-audio';
 import { BottomTabInset } from '@/constants/theme';
 
 type Step = 1 | 2 | 3 | 3.5 | 4;
@@ -22,12 +23,11 @@ interface HospitalCall {
   phone: string;
   lat: number;
   lng: number;
-  distance: number; // 현재 GPS 기준 거리 (km)
-  etaMin: number; // 도착 예정 시간 (분)
+  distance: number;
+  etaMin: number;
   status: '발신 중' | '수락' | '거절';
 }
 
-// 진주시 주요 응급실 실제 GPS 좌표 및 연락처 마스터 데이터
 const JINJU_HOSPITALS = [
   {
     id: 'h1',
@@ -66,7 +66,6 @@ const JINJU_HOSPITALS = [
   },
 ];
 
-// 두 GPS 좌표 간 도로 예상 거리 계산 함수 (Haversine + 도심 굴곡 계수 1.3)
 function getDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -84,27 +83,24 @@ function getDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): 
 export default function HomeScreen() {
   const [step, setStep] = useState<Step>(1);
 
-  // GPS 상태 (기본 폴백 좌표를 경상남도 진주시 중심으로 설정)
   const [locationText, setLocationText] = useState('진주시 GPS 위치 탐색 중...');
   const [coords, setCoords] = useState<{ lat: number; lng: number }>({
-    lat: 35.1799, // 진주시 중심 기준 위도
-    lng: 128.1076, // 진주시 중심 기준 경도
+    lat: 35.1799,
+    lng: 128.1076,
   });
 
-  // [1단계] 음성 녹음 및 AI 분류 상태
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const [audioUri, setAudioUri] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [conditionTitle, setConditionTitle] = useState('');
   const [keywords, setKeywords] = useState<string[]>([]);
 
-  // [2단계] 병원 동시 호출 상태
   const [callSeconds, setCallSeconds] = useState(0);
   const [hospitals, setHospitals] = useState<HospitalCall[]>([]);
 
-  // [3단계] 선택된 병원
   const [selectedHospital, setSelectedHospital] = useState<HospitalCall | null>(null);
 
-  // [4단계] 이송 및 통화 상태
   const [arrivalSec, setArrivalSec] = useState(240);
   const [callDurationSec, setCallDurationSec] = useState(0);
   const [isMicOn, setIsMicOn] = useState(true);
@@ -112,7 +108,6 @@ export default function HomeScreen() {
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
-  // 앱 실행 시 실시간 GPS 좌표 획득
   useEffect(() => {
     (async () => {
       try {
@@ -142,7 +137,6 @@ export default function HomeScreen() {
     })();
   }, []);
 
-  // 마이크 파형 애니메이션
   useEffect(() => {
     if (isRecording) {
       Animated.loop(
@@ -157,7 +151,6 @@ export default function HomeScreen() {
     }
   }, [isRecording]);
 
-  // 2단계: 진주시 병원 5곳 실제 거리 계산 후 동시 호출 시작
   useEffect(() => {
     if (step !== 2) return;
 
@@ -165,7 +158,7 @@ export default function HomeScreen() {
 
     const calculatedList: HospitalCall[] = JINJU_HOSPITALS.map((h) => {
       const dist = getDistanceKm(coords.lat, coords.lng, h.lat, h.lng);
-      const eta = Math.max(2, Math.round((dist / 45) * 60)); // 구급차 평균 시속 45km 기준
+      const eta = Math.max(2, Math.round((dist / 45) * 60));
       return {
         ...h,
         distance: dist,
@@ -180,17 +173,14 @@ export default function HomeScreen() {
       setCallSeconds((prev) => prev + 1);
     }, 1000);
 
-    // 1.5초 뒤: 한일병원 거절 시뮬레이션
     const t1 = setTimeout(() => {
       setHospitals((prev) => prev.map((h) => (h.id === 'h4' ? { ...h, status: '거절' } : h)));
     }, 1500);
 
-    // 2.5초 뒤: 경상국립대학교병원 수락
     const t2 = setTimeout(() => {
       setHospitals((prev) => prev.map((h) => (h.id === 'h1' ? { ...h, status: '수락' } : h)));
     }, 2500);
 
-    // 3.5초 뒤: 진주고려병원 수락
     const t3 = setTimeout(() => {
       setHospitals((prev) => prev.map((h) => (h.id === 'h2' ? { ...h, status: '수락' } : h)));
     }, 3500);
@@ -203,7 +193,6 @@ export default function HomeScreen() {
     };
   }, [step, coords]);
 
-  // 3.5단계('직통 연결 중') -> 2초 후 4단계 전환
   useEffect(() => {
     if (step !== 3.5) return;
     const t = setTimeout(() => {
@@ -215,7 +204,6 @@ export default function HomeScreen() {
     return () => clearTimeout(t);
   }, [step]);
 
-  // 4단계 카운트다운
   useEffect(() => {
     if (step !== 4) return;
     setCallDurationSec(0);
@@ -253,22 +241,43 @@ export default function HomeScreen() {
     </View>
   );
 
-  const handleMicPress = () => {
-    if (!isRecording) {
-      setTranscript('');
-      setConditionTitle('');
-      setKeywords([]);
-      setIsRecording(true);
-    } else {
+  const handleMicPress = async () => {
+    try {
+      if (!isRecording) {
+        const status = await AudioModule.requestRecordingPermissionsAsync();
+        if (!status.granted) {
+          Alert.alert('권한 필요', '설정에서 마이크 권한을 허용해 주세요.');
+          return;
+        }
+
+        await audioRecorder.prepareToRecordAsync();
+        audioRecorder.record();
+
+        setAudioUri(null);
+        setTranscript('');
+        setConditionTitle('');
+        setKeywords([]);
+        setIsRecording(true);
+      } else {
+        setIsRecording(false);
+        await audioRecorder.stop();
+        const uri = audioRecorder.uri;
+        setAudioUri(uri);
+        console.log('생성된 실제 녹음 파일(.m4a):', uri);
+
+        setTranscript('60대 남성, 흉통 호소하다가 심정지 발생. 현재 CPR 진행 중입니다.');
+        setConditionTitle('심정지');
+        setKeywords(['즉시', 'CPR 진행 중', '60대 남성']);
+      }
+    } catch (err) {
+      console.error('마이크 녹음 오류:', err);
       setIsRecording(false);
-      setTranscript('60대 남성, 흉통 호소하다가 심정지 발생. 현재 CPR 진행 중입니다.');
-      setConditionTitle('심정지');
-      setKeywords(['즉시', 'CPR 진행 중', '60대 남성']);
     }
   };
 
   const resetAllToHome = () => {
     setIsRecording(false);
+    setAudioUri(null);
     setTranscript('');
     setConditionTitle('');
     setKeywords([]);
@@ -276,7 +285,6 @@ export default function HomeScreen() {
     setStep(1);
   };
 
-  // [STEP 1 / 4]
   if (step === 1) {
     const hasResult = transcript.length > 0;
     return (
@@ -338,7 +346,7 @@ export default function HomeScreen() {
 
           <View style={styles.resultBox}>
             {isRecording ? (
-              <Text style={styles.listeningText}>🔴 실시간 음성 녹음 중...</Text>
+              <Text style={styles.listeningText}>🔴 실시간 음성 녹음 중... (.m4a 생성 중)</Text>
             ) : hasResult ? (
               <>
                 <Text style={styles.transcriptText}>"{transcript}"</Text>
@@ -352,6 +360,11 @@ export default function HomeScreen() {
                     </View>
                   ))}
                 </View>
+                {audioUri && (
+                  <Text style={styles.audioFileText}>
+                    📎 녹음 파일 저장됨: {audioUri.split('/').pop()}
+                  </Text>
+                )}
               </>
             ) : (
               <Text style={styles.placeholderText}>
@@ -376,7 +389,6 @@ export default function HomeScreen() {
     );
   }
 
-  // [STEP 2 / 4]
   if (step === 2) {
     const acceptedList = hospitals.filter((h) => h.status === '수락');
     const waitingCount = hospitals.filter((h) => h.status === '발신 중').length;
@@ -472,7 +484,6 @@ export default function HomeScreen() {
     );
   }
 
-  // [STEP 3 / 4]
   if (step === 3) {
     const acceptedSorted = hospitals
       .filter((h) => h.status === '수락')
@@ -499,8 +510,6 @@ export default function HomeScreen() {
                 onLongPress={() => {
                   setSelectedHospital(h);
                   setStep(3.5);
-                  // 실제 스마트폰 전화 앱 다이얼 연결 (필요 시 주석 해제)
-                  // Linking.openURL(`tel:${h.phone}`);
                 }}
                 style={[styles.selectCard, isFirst && styles.selectCardFirst]}
               >
@@ -535,7 +544,6 @@ export default function HomeScreen() {
     );
   }
 
-  // [STEP 3.5]
   if (step === 3.5 && selectedHospital) {
     return (
       <SafeAreaView style={styles.container}>
@@ -554,7 +562,6 @@ export default function HomeScreen() {
     );
   }
 
-  // [STEP 4 / 4]
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" />
@@ -743,6 +750,11 @@ const styles = StyleSheet.create({
   urgentTagText: { color: '#F87171', fontWeight: 'bold', fontSize: 12 },
   keywordTag: { backgroundColor: '#22252A', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
   keywordTagText: { color: '#93C5FD', fontSize: 12, fontWeight: '600' },
+  audioFileText: {
+    color: '#6EE7B7',
+    fontSize: 11,
+    marginTop: 10,
+  },
 
   primaryBtn: {
     backgroundColor: '#1F2229',
